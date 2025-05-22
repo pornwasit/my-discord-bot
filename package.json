@@ -1,28 +1,27 @@
 {
-  "name": "discord-bot-thailand",
+  "name": "discord-bot-render",
   "version": "1.0.0",
-  "description": "Discord Bot สำหรับคนไทย พร้อมคำสั่งต่างๆ",
-  "main": "index.js",
+  "description": "Discord bot for Render.com hosting",
+  "main": "bot.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
   },
-  "keywords": [
-    "discord",
-    "bot",
-    "thailand",
-    "thai"
-  ],
-  "author": "Your Name",
-  "license": "MIT",
   "dependencies": {
     "discord.js": "^14.14.1",
     "express": "^4.18.2"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.2"
   },
   "engines": {
-    "node": ">=16.0.0"
-  }
+    "node": "18.x"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "render"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
 }
