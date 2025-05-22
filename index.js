@@ -1,23 +1,33 @@
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 const express = require('express');
-const https = require('https');
-const http = require('http');
+const config = require('./config.json');
 
-// สร้าง Express server เพื่อไม่ให้ Render ทำให้ sleep
+// Express Server สำหรับ Keep-Alive
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// สร้าง Discord Client
-const client = new Client({ 
+// สร้าง Discord Client พร้อม intents ที่จำเป็น
+const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
-    ] 
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildPresences
+    ],
+    // ตั้งค่าเพิ่มเติมเพื่อความเสถียร
+    presence: {
+        activities: [{
+            name: config.status || 'กำลังออนไลน์ 24/7',
+            type: ActivityType.Watching
+        }],
+        status: 'online'
+    }
 });
 
-// ===== EXPRESS SERVER SETUP (สำคัญสำหรับ Render) =====
+// ===== EXPRESS SETUP (Keep-Alive System) =====
+app.use(express.json());
+
 app.get('/', (req, res) => {
     const uptime = process.uptime();
     const hours = Math.floor(uptime / 3600);
@@ -25,384 +35,429 @@ app.get('/', (req, res) => {
     const seconds = Math.floor(uptime % 60);
     
     res.json({
-        status: 'Bot is running! 🤖',
+        status: 'Bot Online! 🟢',
         uptime: `${hours}h ${minutes}m ${seconds}s`,
-        botStatus: client.user ? `${client.user.username} is online` : 'Bot is starting...',
-        servers: client.guilds ? client.guilds.cache.size : 0,
+        bot: client.user ? {
+            name: client.user.username,
+            id: client.user.id,
+            status: 'Online'
+        } : 'Starting...',
+        guilds: client.guilds.cache.size,
+        users: client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0),
+        ping: client.ws.ping || 'N/A',
         timestamp: new Date().toISOString()
     });
 });
 
 app.get('/health', (req, res) => {
-    res.json({ 
+    res.json({
         status: 'healthy',
         bot: client.user ? 'online' : 'offline',
+        ping: client.ws.ping || 'N/A',
         timestamp: new Date().toISOString()
     });
 });
 
-app.get('/ping', (req, res) => {
-    res.json({ 
-        message: 'pong',
-        latency: client.ws.ping || 'N/A',
-        timestamp: new Date().toISOString()
-    });
+app.get('/restart', (req, res) => {
+    res.json({ message: 'Restarting bot...' });
+    setTimeout(() => {
+        process.exit(0);
+    }, 1000);
 });
 
-// เริ่มต้น Express server
-app.listen(PORT, () => {
-    console.log(`🌐 Express server running on port ${PORT}`);
-    console.log(`📡 Health check available at: http://localhost:${PORT}/health`);
+const server = app.listen(PORT, () => {
+    console.log(`🌐 Keep-Alive server running on port ${PORT}`);
 });
 
-// ===== KEEP ALIVE SYSTEM =====
-function keepAlive() {
+// ===== KEEP-ALIVE SYSTEM =====
+function startKeepAlive() {
+    const pingInterval = 13 * 60 * 1000; // 13 นาที
     const appUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
     
-    setInterval(() => {
-        const url = new URL(`${appUrl}/health`);
-        const options = {
-            hostname: url.hostname,
-            port: url.port,
-            path: url.pathname,
-            method: 'GET'
-        };
-
-        const protocol = url.protocol === 'https:' ? https : http;
-        
-        const req = protocol.request(options, (res) => {
-            let data = '';
-            res.on('data', (chunk) => {
-                data += chunk;
+    setInterval(async () => {
+        try {
+            const response = await fetch(`${appUrl}/health`);
+            const data = await response.json();
+            console.log(`🔄 Keep-alive: ${data.status} | Ping: ${client.ws.ping}ms | ${new Date().toLocaleTimeString('th-TH')}`);
+        } catch (error) {
+            console.log(`⚠️ Keep-alive failed: ${error.message}`);
+            // ลองใช้ http module แทน
+            const http = require('http');
+            http.get(`${appUrl}/health`, (res) => {
+                console.log(`🔄 Backup keep-alive successful`);
+            }).on('error', () => {
+                console.log(`❌ All keep-alive methods failed`);
             });
-            res.on('end', () => {
-                try {
-                    const response = JSON.parse(data);
-                    console.log(`🔄 Keep-alive ping: ${response.status} at ${new Date().toLocaleTimeString('th-TH')}`);
-                } catch (error) {
-                    console.log(`🔄 Keep-alive ping successful at ${new Date().toLocaleTimeString('th-TH')}`);
-                }
-            });
-        });
-
-        req.on('error', (error) => {
-            console.log(`❌ Keep-alive ping failed: ${error.message}`);
-        });
-
-        req.end();
-    }, 14 * 60 * 1000); // Ping ทุก 14 นาที
+        }
+    }, pingInterval);
+    
+    console.log('🔄 Keep-alive system started (every 13 minutes)');
 }
 
-// ===== DISCORD BOT CODE =====
-// เมื่อบอทออนไลน์
+// ===== AUTO-RECONNECT SYSTEM =====
+let reconnectAttempts = 0;
+const maxReconnectAttempts = 5;
+
+function handleReconnect() {
+    if (reconnectAttempts < maxReconnectAttempts) {
+        reconnectAttempts++;
+        console.log(`🔄 Attempting to reconnect... (${reconnectAttempts}/${maxReconnectAttempts})`);
+        
+        setTimeout(() => {
+            client.login(process.env.DISCORD_TOKEN || config.token).catch(error => {
+                console.error(`❌ Reconnect attempt ${reconnectAttempts} failed:`, error.message);
+                if (reconnectAttempts >= maxReconnectAttempts) {
+                    console.log('💀 Max reconnect attempts reached. Restarting process...');
+                    process.exit(1);
+                } else {
+                    handleReconnect();
+                }
+            });
+        }, 5000 * reconnectAttempts); // เพิ่มเวลารอตามจำนวนครั้งที่ลอง
+    }
+}
+
+// ===== DISCORD BOT EVENTS =====
 client.once('ready', () => {
-    console.log(`✅ ${client.user.tag} is online!`);
-    console.log(`📊 Serving ${client.guilds.cache.size} servers`);
+    console.log('\n🎉 ===== BOT SUCCESSFULLY STARTED =====');
+    console.log(`✅ Bot: ${client.user.tag}`);
+    console.log(`📊 Guilds: ${client.guilds.cache.size}`);
+    console.log(`👥 Users: ${client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0)}`);
+    console.log(`🏓 Ping: ${client.ws.ping}ms`);
+    console.log('=====================================\n');
     
-    // ตั้งสถานะของบอท
-    client.user.setActivity('พิมพ์ !help สำหรับความช่วยเหลือ | Hosted on Render', { 
-        type: 'WATCHING' 
+    // รีเซ็ตตัวนับ reconnect
+    reconnectAttempts = 0;
+    
+    // ตั้งสถานะ
+    client.user.setPresence({
+        activities: [{
+            name: config.status || 'ออนไลน์ 24/7 | !help',
+            type: ActivityType.Watching
+        }],
+        status: 'online'
     });
     
-    // เริ่ม keep-alive system หลังจากบอทออนไลน์
-    keepAlive();
-    console.log('🔄 Keep-alive system started');
+    // เริ่ม keep-alive system
+    startKeepAlive();
 });
 
-// จัดการข้อความ
-client.on('messageCreate', message => {
-    // ไม่ตอบบอทอื่นๆ
+// เมื่อเชื่อมต่อสำเร็จ
+client.on('reconnecting', () => {
+    console.log('🔄 Reconnecting to Discord...');
+});
+
+// เมื่อเชื่อมต่อสำเร็จอีกครั้ง
+client.on('resumed', () => {
+    console.log('✅ Successfully resumed connection!');
+    reconnectAttempts = 0;
+});
+
+// จัดการ disconnect
+client.on('disconnect', () => {
+    console.log('⚠️ Bot disconnected from Discord');
+    handleReconnect();
+});
+
+// จัดการ error
+client.on('error', error => {
+    console.error('❌ Discord client error:', error);
+    if (error.code === 'TOKEN_INVALID') {
+        console.error('💀 Invalid token! Please check your DISCORD_TOKEN');
+        process.exit(1);
+    }
+});
+
+client.on('warn', info => {
+    console.warn('⚠️ Discord warning:', info);
+});
+
+// จัดการ rate limit
+client.on('rateLimit', (info) => {
+    console.log(`⏱️ Rate limited: ${info.method} ${info.path} - ${info.timeout}ms`);
+});
+
+// ===== MESSAGE HANDLING =====
+client.on('messageCreate', async (message) => {
+    // ไม่ตอบบอทอื่น
     if (message.author.bot) return;
     
     const content = message.content.toLowerCase();
+    const prefix = config.prefix || '!';
     
-    // คำสั่งต่างๆ
-    if (content === '!hello' || content === '!hi') {
-        message.reply('🙏 สวัสดีครับ! ยินดีที่ได้พบกับคุณ');
+    // เช็คว่าข้อความขึ้นต้นด้วย prefix หรือไม่
+    if (!content.startsWith(prefix)) {
+        // ตอบเมื่อมีคนเอ่ยถึงบอท
+        if (content.includes('บอท') || content.includes('bot')) {
+            const responses = config.autoReply || [
+                'เรียกผมไหมครับ? 🤖',
+                'มีอะไรให้ช่วยไหมครับ?',
+                'ผมอยู่นี่แล้วครับ! ✋'
+            ];
+            const randomResponse = responses[Math.floor(Math.random() * responses.length)];
+            return message.reply(randomResponse);
+        }
+        return;
     }
     
-    else if (content === '!help') {
-        const helpEmbed = {
-            color: 0x0099FF,
-            title: '📋 คำสั่งที่ใช้ได้',
-            description: 'รายการคำสั่งทั้งหมด:',
-            fields: [
-                {
-                    name: '!hello, !hi',
-                    value: 'ทักทายบอท',
-                    inline: true
-                },
-                {
-                    name: '!ping',
-                    value: 'เช็ค ping ของบอท',
-                    inline: true
-                },
-                {
-                    name: '!uptime',
-                    value: 'ดูเวลาที่บอทรันมา',
-                    inline: true
-                },
-                {
-                    name: '!time',
-                    value: 'ดูเวลาปัจจุบัน',
-                    inline: true
-                },
-                {
-                    name: '!server',
-                    value: 'ข้อมูลเซิร์ฟเวอร์',
-                    inline: true
-                },
-                {
-                    name: '!user',
-                    value: 'ข้อมูลผู้ใช้',
-                    inline: true
-                },
-                {
-                    name: '!joke',
-                    value: 'เล่าเรื่องตลก',
-                    inline: true
-                },
-                {
-                    name: '!status',
-                    value: 'สถานะของบอท',
-                    inline: true
-                }
-            ],
-            timestamp: new Date(),
-            footer: {
-                text: 'Hosted on Render.com 🚀 | Keep-Alive System Active'
-            }
-        };
-        message.reply({ embeds: [helpEmbed] });
-    }
+    // ตัดคำสั่งออกจาก prefix
+    const args = content.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
     
-    else if (content === '!ping') {
-        const sent = Date.now();
-        message.reply('🏓 กำลังเช็ค ping...').then(sentMessage => {
-            const timeDiff = Date.now() - sent;
-            sentMessage.edit(`🏓 Pong! \`${timeDiff}ms\` | API Latency: \`${Math.round(client.ws.ping)}ms\``);
-        });
-    }
-    
-    else if (content === '!uptime') {
-        const uptime = process.uptime();
-        const days = Math.floor(uptime / 86400);
-        const hours = Math.floor((uptime % 86400) / 3600);
-        const minutes = Math.floor((uptime % 3600) / 60);
-        const seconds = Math.floor(uptime % 60);
-        
-        let uptimeString = '';
-        if (days > 0) uptimeString += `${days} วัน `;
-        if (hours > 0) uptimeString += `${hours} ชั่วโมง `;
-        if (minutes > 0) uptimeString += `${minutes} นาที `;
-        uptimeString += `${seconds} วินาที`;
-        
-        message.reply(`⏰ บอทรันมาแล้ว: **${uptimeString}**\n🔄 Keep-Alive System: **Active**`);
-    }
-    
-    else if (content === '!status') {
-        const statusEmbed = {
-            color: 0x00FF00,
-            title: '📊 สถานะของบอท',
-            fields: [
-                {
-                    name: '🤖 ชื่อบอท',
-                    value: client.user.username,
-                    inline: true
-                },
-                {
-                    name: '🔗 สถานะ',
-                    value: 'ออนไลน์ 🟢',
-                    inline: true
-                },
-                {
-                    name: '📡 Ping',
-                    value: `${Math.round(client.ws.ping)}ms`,
-                    inline: true
-                },
-                {
-                    name: '🏠 เซิร์ฟเวอร์',
-                    value: `${client.guilds.cache.size} เซิร์ฟเวอร์`,
-                    inline: true
-                },
-                {
-                    name: '👥 ผู้ใช้',
-                    value: `${client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0)} คน`,
-                    inline: true
-                },
-                {
-                    name: '🚀 Host',
-                    value: 'Render.com',
-                    inline: true
-                }
-            ],
-            timestamp: new Date(),
-            footer: {
-                text: 'ระบบ Keep-Alive ทำงานอยู่ 🔄'
-            }
-        };
-        message.reply({ embeds: [statusEmbed] });
-    }
-    
-    else if (content === '!time') {
-        const now = new Date();
-        const thaiTime = now.toLocaleString('th-TH', {
-            timeZone: 'Asia/Bangkok',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit'
-        });
-        message.reply(`🕐 เวลาปัจจุบัน: **${thaiTime}**`);
-    }
-    
-    else if (content === '!server') {
-        const guild = message.guild;
-        if (guild) {
-            const serverEmbed = {
-                color: 0x00FF00,
-                title: `📊 ข้อมูลเซิร์ฟเวอร์: ${guild.name}`,
-                thumbnail: {
-                    url: guild.iconURL()
-                },
-                fields: [
-                    {
-                        name: '👥 สมาชิก',
-                        value: `${guild.memberCount} คน`,
-                        inline: true
-                    },
-                    {
-                        name: '📅 สร้างเมื่อ',
-                        value: guild.createdAt.toLocaleDateString('th-TH'),
-                        inline: true
-                    },
-                    {
-                        name: '👑 เจ้าของ',
-                        value: `<@${guild.ownerId}>`,
-                        inline: true
+    try {
+        // คำสั่งพื้นฐาน
+        switch (command) {
+            case 'ping':
+                const sent = Date.now();
+                const msg = await message.reply('🏓 กำลังเช็ค ping...');
+                const timeDiff = Date.now() - sent;
+                await msg.edit(`🏓 Pong!\n📶 Latency: \`${timeDiff}ms\`\n💓 API Ping: \`${Math.round(client.ws.ping)}ms\``);
+                break;
+                
+            case 'uptime':
+                const uptime = process.uptime();
+                const days = Math.floor(uptime / 86400);
+                const hours = Math.floor((uptime % 86400) / 3600);
+                const minutes = Math.floor((uptime % 3600) / 60);
+                const seconds = Math.floor(uptime % 60);
+                
+                let uptimeString = '';
+                if (days > 0) uptimeString += `${days} วัน `;
+                if (hours > 0) uptimeString += `${hours} ชั่วโมง `;
+                if (minutes > 0) uptimeString += `${minutes} นาที `;
+                uptimeString += `${seconds} วินาที`;
+                
+                await message.reply(`⏰ **บอทออนไลน์มาแล้ว:** ${uptimeString}\n🔄 **Keep-Alive:** Active\n🟢 **สถานะ:** Online`);
+                break;
+                
+            case 'status':
+                const statusEmbed = {
+                    color: 0x00FF00,
+                    title: '📊 สถานะของบอท',
+                    fields: [
+                        {
+                            name: '🤖 ชื่อบอท',
+                            value: client.user.username,
+                            inline: true
+                        },
+                        {
+                            name: '🟢 สถานะ',
+                            value: 'ออนไลน์',
+                            inline: true
+                        },
+                        {
+                            name: '📡 Ping',
+                            value: `${Math.round(client.ws.ping)}ms`,
+                            inline: true
+                        },
+                        {
+                            name: '🏠 เซิร์ฟเวอร์',
+                            value: `${client.guilds.cache.size} เซิร์ฟเวอร์`,
+                            inline: true
+                        },
+                        {
+                            name: '👥 ผู้ใช้',
+                            value: `${client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0)} คน`,
+                            inline: true
+                        },
+                        {
+                            name: '🚀 Host',
+                            value: 'Render.com',
+                            inline: true
+                        }
+                    ],
+                    timestamp: new Date(),
+                    footer: {
+                        text: '24/7 Online • Keep-Alive Active'
                     }
-                ]
-            };
-            message.reply({ embeds: [serverEmbed] });
-        }
-    }
-    
-    else if (content === '!user') {
-        const user = message.author;
-        const member = message.member;
-        
-        const userEmbed = {
-            color: 0xFF0000,
-            title: `👤 ข้อมูลผู้ใช้`,
-            thumbnail: {
-                url: user.displayAvatarURL()
-            },
-            fields: [
-                {
-                    name: '📛 ชื่อ',
-                    value: user.username,
-                    inline: true
-                },
-                {
-                    name: '🏷️ Tag',
-                    value: user.tag,
-                    inline: true
-                },
-                {
-                    name: '🆔 ID',
-                    value: user.id,
-                    inline: true
-                },
-                {
-                    name: '📅 สร้างบัญชีเมื่อ',
-                    value: user.createdAt.toLocaleDateString('th-TH'),
-                    inline: true
+                };
+                await message.reply({ embeds: [statusEmbed] });
+                break;
+                
+            case 'help':
+                const helpEmbed = {
+                    color: 0x0099FF,
+                    title: '📋 คำสั่งที่ใช้ได้',
+                    description: `ใช้ prefix: \`${prefix}\``,
+                    fields: [
+                        {
+                            name: `${prefix}ping`,
+                            value: 'เช็ค ping และ latency',
+                            inline: true
+                        },
+                        {
+                            name: `${prefix}uptime`,
+                            value: 'ดูเวลาที่บอทออนไลน์',
+                            inline: true
+                        },
+                        {
+                            name: `${prefix}status`,
+                            value: 'ดูสถานะของบอท',
+                            inline: true
+                        },
+                        {
+                            name: `${prefix}server`,
+                            value: 'ข้อมูลเซิร์ฟเวอร์',
+                            inline: true
+                        },
+                        {
+                            name: `${prefix}user`,
+                            value: 'ข้อมูลผู้ใช้',
+                            inline: true
+                        },
+                        {
+                            name: `${prefix}restart`,
+                            value: 'รีสตาร์ทบอท (เฉพาะ Owner)',
+                            inline: true
+                        }
+                    ],
+                    timestamp: new Date(),
+                    footer: {
+                        text: 'บอทออนไลน์ 24/7 | Hosted on Render'
+                    }
+                };
+                await message.reply({ embeds: [helpEmbed] });
+                break;
+                
+            case 'server':
+                if (!message.guild) return message.reply('คำสั่งนี้ใช้ได้เฉพาะในเซิร์ฟเวอร์เท่านั้น');
+                
+                const guild = message.guild;
+                const serverEmbed = {
+                    color: 0x00FF00,
+                    title: `📊 ข้อมูลเซิร์ฟเวอร์: ${guild.name}`,
+                    thumbnail: {
+                        url: guild.iconURL() || null
+                    },
+                    fields: [
+                        {
+                            name: '👥 สมาชิก',
+                            value: `${guild.memberCount} คน`,
+                            inline: true
+                        },
+                        {
+                            name: '📅 สร้างเมื่อ',
+                            value: guild.createdAt.toLocaleDateString('th-TH'),
+                            inline: true
+                        },
+                        {
+                            name: '👑 เจ้าของ',
+                            value: `<@${guild.ownerId}>`,
+                            inline: true
+                        }
+                    ]
+                };
+                await message.reply({ embeds: [serverEmbed] });
+                break;
+                
+            case 'user':
+                const user = message.author;
+                const member = message.member;
+                
+                const userEmbed = {
+                    color: 0xFF0000,
+                    title: '👤 ข้อมูลผู้ใช้',
+                    thumbnail: {
+                        url: user.displayAvatarURL()
+                    },
+                    fields: [
+                        {
+                            name: '📛 ชื่อ',
+                            value: user.username,
+                            inline: true
+                        },
+                        {
+                            name: '🏷️ Tag',
+                            value: user.tag,
+                            inline: true
+                        },
+                        {
+                            name: '🆔 ID',
+                            value: user.id,
+                            inline: true
+                        },
+                        {
+                            name: '📅 สร้างบัญชีเมื่อ',
+                            value: user.createdAt.toLocaleDateString('th-TH'),
+                            inline: true
+                        }
+                    ]
+                };
+                
+                if (member && member.joinedAt) {
+                    userEmbed.fields.push({
+                        name: '📥 เข้าร่วมเซิร์ฟเวอร์เมื่อ',
+                        value: member.joinedAt.toLocaleDateString('th-TH'),
+                        inline: true
+                    });
                 }
-            ]
-        };
-        
-        if (member) {
-            userEmbed.fields.push({
-                name: '📥 เข้าร่วมเซิร์ฟเวอร์เมื่อ',
-                value: member.joinedAt.toLocaleDateString('th-TH'),
-                inline: true
-            });
+                
+                await message.reply({ embeds: [userEmbed] });
+                break;
+                
+            case 'restart':
+                // เฉพาะ owner เท่านั้น
+                const ownerIds = config.owners || [];
+                if (!ownerIds.includes(message.author.id)) {
+                    return message.reply('❌ คุณไม่มีสิทธิ์ใช้คำสั่งนี้');
+                }
+                
+                await message.reply('🔄 กำลังรีสตาร์ทบอท...');
+                console.log(`🔄 Bot restart requested by ${message.author.tag}`);
+                setTimeout(() => {
+                    process.exit(0);
+                }, 2000);
+                break;
+                
+            default:
+                // หาคำสั่งใน config
+                if (config.commands && config.commands[command]) {
+                    const cmd = config.commands[command];
+                    await message.reply(cmd.response || 'ไม่พบการตอบกลับ');
+                }
+                break;
         }
-        
-        message.reply({ embeds: [userEmbed] });
-    }
-    
-    else if (content === '!joke') {
-        const jokes = [
-            'ทำไมผีถึงไม่กิน KFC? เพราะกลัวพันเอก! 👻',
-            'อะไรที่มี 4 ขา แต่เดินไม่ได้? โต๊ะ! 🪑',
-            'ทำไมเสือถึงไม่เล่นการพนัน? เพราะกลัวเสียเสือ! 🐅',
-            'อะไรที่ยิ่งล้างยิ่งสกปรก? น้ำ! 💧',
-            'ทำไมช้างถึงไม่ใช้คอมพิวเตอร์? เพราะกลัวเมาส์! 🐘',
-            'ทำไมปลาไน่เล่นบาส? เพราะกลัวแฟน(ปลา)! 🐟',
-            'อะไรที่กินได้ แต่กัดไม่ได้? ข้าว! 🍚'
-        ];
-        
-        const randomJoke = jokes[Math.floor(Math.random() * jokes.length)];
-        message.reply(`😂 ${randomJoke}`);
-    }
-    
-    // ตอบกลับข้อความที่มีคำว่า "บอท"
-    else if (content.includes('บอท')) {
-        const responses = [
-            'เรียกผมไหมครับ? 🤖',
-            'มีอะไรให้ช่วยไหมครับ? 😊',
-            'ผมอยู่นี่แล้วครับ! ✋',
-            'พร้อมให้บริการครับ! 🎯'
-        ];
-        const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-        message.reply(randomResponse);
+    } catch (error) {
+        console.error(`❌ Error handling command "${command}":`, error);
+        await message.reply('❌ เกิดข้อผิดพลาดในการประมวลผลคำสั่ง').catch(() => {});
     }
 });
 
-// จัดการ Error
-client.on('error', error => {
-    console.error('❌ Discord client error:', error);
+// ===== PROCESS HANDLERS =====
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-client.on('disconnect', () => {
-    console.log('⚠️ Bot disconnected, attempting to reconnect...');
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    process.exit(1);
 });
 
-client.on('reconnecting', () => {
-    console.log('🔄 Bot reconnecting...');
-});
-
-process.on('unhandledRejection', error => {
-    console.error('❌ Unhandled promise rejection:', error);
-});
-
-// การจัดการการปิดโปรแกรม
 process.on('SIGINT', () => {
-    console.log('🛑 Bot is shutting down...');
+    console.log('\n🛑 Shutting down bot gracefully...');
     client.destroy();
+    server.close();
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    console.log('🛑 Bot is being terminated...');
+    console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
     client.destroy();
+    server.close();
     process.exit(0);
 });
 
-// เข้าสู่ระบบด้วย Token
-const token = process.env.DISCORD_TOKEN;
+// ===== START BOT =====
+const token = process.env.DISCORD_TOKEN || config.token;
 if (!token) {
-    console.error('❌ ไม่พบ DISCORD_TOKEN ใน environment variables');
+    console.error('❌ ไม่พบ DISCORD_TOKEN ใน environment variables หรือ config.json');
     process.exit(1);
 }
 
-console.log('🚀 Starting Discord bot with Keep-Alive system...');
-console.log('🌐 Express server will start on port', PORT);
+console.log('🚀 Starting stable Discord bot...');
+console.log(`🌐 Keep-alive server will run on port ${PORT}`);
 
 client.login(token).catch(error => {
-    console.error('❌ ไม่สามารถเข้าสู่ระบบได้:', error);
+    console.error('❌ Failed to login:', error);
     process.exit(1);
 });
