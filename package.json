@@ -1,0 +1,27 @@
+{
+  "name": "discord-bot-thailand",
+  "version": "1.0.0",
+  "description": "Discord Bot สำหรับคนไทย พร้อมคำสั่งต่างๆ",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "thailand",
+    "thai"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
