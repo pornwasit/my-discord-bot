@@ -1,5 +1,7 @@
 const { Client, GatewayIntentBits } = require('discord.js');
 const express = require('express');
+const https = require('https');
+const http = require('http');
 
 // สร้าง Express server เพื่อไม่ให้ Render ทำให้ sleep
 const app = express();
@@ -57,14 +59,37 @@ app.listen(PORT, () => {
 function keepAlive() {
     const appUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
     
-    setInterval(async () => {
-        try {
-            const response = await fetch(`${appUrl}/health`);
-            const data = await response.json();
-            console.log(`🔄 Keep-alive ping: ${data.status} at ${new Date().toLocaleTimeString('th-TH')}`);
-        } catch (error) {
+    setInterval(() => {
+        const url = new URL(`${appUrl}/health`);
+        const options = {
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: 'GET'
+        };
+
+        const protocol = url.protocol === 'https:' ? https : http;
+        
+        const req = protocol.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    const response = JSON.parse(data);
+                    console.log(`🔄 Keep-alive ping: ${response.status} at ${new Date().toLocaleTimeString('th-TH')}`);
+                } catch (error) {
+                    console.log(`🔄 Keep-alive ping successful at ${new Date().toLocaleTimeString('th-TH')}`);
+                }
+            });
+        });
+
+        req.on('error', (error) => {
             console.log(`❌ Keep-alive ping failed: ${error.message}`);
-        }
+        });
+
+        req.end();
     }, 14 * 60 * 1000); // Ping ทุก 14 นาที
 }
 
@@ -316,7 +341,7 @@ client.on('messageCreate', message => {
             'ทำไมเสือถึงไม่เล่นการพนัน? เพราะกลัวเสียเสือ! 🐅',
             'อะไรที่ยิ่งล้างยิ่งสกปรก? น้ำ! 💧',
             'ทำไมช้างถึงไม่ใช้คอมพิวเตอร์? เพราะกลัวเมาส์! 🐘',
-            'ทำไมปลาไม่เล่นบาส? เพราะกลัวแฟน(ปลา)! 🐟',
+            'ทำไมปลาไน่เล่นบาส? เพราะกลัวแฟน(ปลา)! 🐟',
             'อะไรที่กินได้ แต่กัดไม่ได้? ข้าว! 🍚'
         ];
         
